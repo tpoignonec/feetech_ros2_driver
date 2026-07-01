@@ -139,6 +139,18 @@ class CommunicationProtocol {
     return reg_write(id, SMS_STS_ACC, buffer);
   }
 
+  Result reg_write_position(const uint8_t id, const int position, const int speed, const int acceleration,
+                            const int max_torque) {
+    // 9 bytes: ACC, GOAL_POSITION(L/H), GOAL_TIME(L/H), GOAL_SPEED(L/H), TORQUE_LIMIT(L/H).
+    std::array<uint8_t, 9> buffer{};
+    buffer[0] = acceleration;
+    to_sts(&buffer[1], &buffer[2], encode_sign_magnitude(position, SMS_STS_SIGN_BIT_POSITION));
+    to_sts(&buffer[3], &buffer[4], 0);  // Time
+    to_sts(&buffer[5], &buffer[6], encode_sign_magnitude(speed, SMS_STS_SIGN_BIT_VELOCITY));
+    to_sts(&buffer[7], &buffer[8], max_torque);
+    return reg_write(id, SMS_STS_ACC, buffer);
+  }
+
   template <std::size_t N>
   Result reg_write(const uint8_t id, const uint8_t memory_address, const std::array<uint8_t, N>& parameters) {
     return write_buffer(id, memory_address, parameters, kInstructionRegWrite).and_then([&] {
