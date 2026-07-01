@@ -32,6 +32,8 @@ class CommunicationProtocol {
 
   Result write_position(uint8_t id, int position, int speed, int acceleration);
 
+  Result write_position(uint8_t id, int position, int speed, int acceleration, int max_torque);
+
   // From User Manual: The real-time performance of this command is higher. A SYNC WRITE command can modify the contents
   // of control tables of multiple servos at one time, while the REG WRITE+ACTION command is done step by step.
   template <std::size_t N>
@@ -95,6 +97,35 @@ class CommunicationProtocol {
       to_sts(&buffer[i][1], &buffer[i][2], encode_sign_magnitude(position[i], SMS_STS_SIGN_BIT_POSITION));
       to_sts(&buffer[i][3], &buffer[i][4], 0);  // Time
       to_sts(&buffer[i][5], &buffer[i][6], encode_sign_magnitude(speed[i], SMS_STS_SIGN_BIT_VELOCITY));
+    }
+    return sync_write(ids, SMS_STS_ACC, buffer);
+  }
+
+  Result sync_write_position(const std::vector<uint8_t>& ids,
+                             const std::vector<int>& position,
+                             const std::vector<int>& speed,
+                             const std::vector<int>& acceleration,
+                             const std::vector<int>& max_torque) {
+    if (ids.size() != position.size() || ids.size() != speed.size()
+        || ids.size() != acceleration.size() || ids.size() != max_torque.size()) {
+      return tl::make_unexpected(fmt::format(
+          "Sizes of IDs, position, speed, acceleration, and max_torque must be the same - ids[{}], position[{}], "
+          "speed[{}], acceleration[{}], max_torque[{}]",
+          ids.size(),
+          position.size(),
+          speed.size(),
+          acceleration.size(),
+          max_torque.size()));
+    }
+    // 9 bytes: ACC, GOAL_POSITION(L/H), GOAL_TIME(L/H), GOAL_SPEED(L/H), TORQUE_LIMIT(L/H).
+    std::vector<std::array<uint8_t, 9>> buffer;
+    buffer.resize(ids.size());
+    for (size_t i = 0; i < ids.size(); ++i) {
+      buffer[i][0] = acceleration[i];
+      to_sts(&buffer[i][1], &buffer[i][2], encode_sign_magnitude(position[i], SMS_STS_SIGN_BIT_POSITION));
+      to_sts(&buffer[i][3], &buffer[i][4], 0);  // Time
+      to_sts(&buffer[i][5], &buffer[i][6], encode_sign_magnitude(speed[i], SMS_STS_SIGN_BIT_VELOCITY));
+      to_sts(&buffer[i][7], &buffer[i][8], max_torque[i]);
     }
     return sync_write(ids, SMS_STS_ACC, buffer);
   }

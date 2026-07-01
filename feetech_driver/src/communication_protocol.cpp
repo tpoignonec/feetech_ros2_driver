@@ -90,6 +90,19 @@ Result CommunicationProtocol::write_position(const uint8_t id, int position, int
   return write(id, SMS_STS_ACC, buffer);
 }
 
+Result CommunicationProtocol::write_position(const uint8_t id, int position, int speed, const int acceleration,
+                                             const int max_torque) {
+  // Registers 41..49 are contiguous: ACC, GOAL_POSITION(L/H), GOAL_TIME(L/H),
+  // GOAL_SPEED(L/H), TORQUE_LIMIT(L/H). A single 9-byte write sets them all.
+  std::array<uint8_t, 9> buffer{};
+  buffer[0] = acceleration;
+  to_sts(&buffer[1], &buffer[2], encode_sign_magnitude(position, SMS_STS_SIGN_BIT_POSITION));
+  to_sts(&buffer[3], &buffer[4], 0);
+  to_sts(&buffer[5], &buffer[6], encode_sign_magnitude(speed, SMS_STS_SIGN_BIT_VELOCITY));
+  to_sts(&buffer[7], &buffer[8], max_torque);
+  return write(id, SMS_STS_ACC, buffer);
+}
+
 Expected<int> CommunicationProtocol::read_position(const uint8_t id) {
   return read_word(id, SMS_STS_PRESENT_POSITION_L).and_then([](auto position) -> Expected<int> {
     return decode_sign_magnitude(position, SMS_STS_SIGN_BIT_POSITION);
