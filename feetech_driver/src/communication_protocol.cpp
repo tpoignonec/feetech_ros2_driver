@@ -168,4 +168,6 @@ Result CommunicationProtocol::reg_write_action(const uint8_t id) {
 }
 
 Expected<int> CommunicationProtocol::read_model_number(uint8_t id) { return read_word(id, SMS_STS_MODEL_L); }
+
+Expected<int> CommunicationProtocol::read_max_torque_limit(uint8_t id) { return read_word(id, SMS_STS_MAX_TORQUE_L); }
 }  // namespace feetech_driver
