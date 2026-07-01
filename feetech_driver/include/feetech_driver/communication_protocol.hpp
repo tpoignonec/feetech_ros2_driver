@@ -180,6 +180,8 @@ class CommunicationProtocol {
   Expected<int> read_position(uint8_t id);
   Expected<int> read_speed(uint8_t id);
   Expected<int> read_model_number(uint8_t id);
+  /// Read the configured max torque limit (EPROM register 16), raw units 0..1000.
+  Expected<int> read_max_torque_limit(uint8_t id);
 
   Result lock_eprom(uint8_t id);
   Result unlock_eprom(uint8_t id);

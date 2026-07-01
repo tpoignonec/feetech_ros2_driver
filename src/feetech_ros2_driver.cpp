@@ -108,6 +108,8 @@ CallbackReturn FeetechHardwareInterface::load_yaml_config_and_warn_(JointIdConfi
 
 CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMap& yaml_by_id) {
   joint_ids_.assign(info_.joints.size(), 0);
+  max_joint_velocity_.assign(info_.joints.size(), feetech_driver::to_radians(kDefaultVelocityTicksPerSec));
+  max_joint_torque_.assign(info_.joints.size(), 1000);  // Default fallback
 
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     const auto& joint = info_.joints[i];
@@ -128,6 +130,22 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
       merged_params = merge_joint_params(it->second, joint.parameters);
     } else {
       merged_params = JointParams(joint.parameters.begin(), joint.parameters.end());
+    }
+
+    // Runtime torque limit (raw register units 0..1000): from YAML/URDF if
+    // present, otherwise read the value already configured on the servo.
+    if (const auto torque_it = merged_params.find("max_torque_limit"); torque_it != merged_params.end()) {
+      int max_torque = std::stoi(torque_it->second);
+      if (max_torque < 0 || max_torque > 1000) {
+        spdlog::error("Joint '{}': 'max_torque_limit' must be in [0, 1000], got {}", joint_name, max_torque);
+        return CallbackReturn::ERROR;
+      }
+      max_joint_torque_[i] = max_torque;
+    } else if (const auto read = communication_protocol_->read_max_torque_limit(joint_ids_[i]); read) {
+      max_joint_torque_[i] = read.value();
+    } else {
+      spdlog::warn("Joint '{}': could not read max_torque_limit from servo ({}); using default {}", joint_name,
+                   read.error(), max_joint_torque_[i]);
     }
 
     if (merged_params.find("offset") != merged_params.end()) {
@@ -281,21 +299,23 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
   std::vector<int> commanded_positions;
   std::vector<int> commanded_speeds;
   std::vector<int> commanded_accelerations;
+  std::vector<int> commanded_max_torques;
 
   for (uint i = 0; i < info_.joints.size(); i++) {
     // Only include joints with command interfaces
     if (!info_.joints[i].command_interfaces.empty()) {
       commanded_joint_ids.push_back(joint_ids_[i]);
       commanded_positions.push_back(feetech_driver::from_radians(hw_positions_[i]) + feetech_driver::kStsMidpoint);
-      commanded_speeds.push_back(2400);       // Default speed
+      commanded_speeds.push_back(feetech_driver::from_radians(max_joint_velocity_[i]));
       commanded_accelerations.push_back(50);  // Default acceleration
+      commanded_max_torques.push_back(max_joint_torque_[i]);
     }
   }
 
   // Only send commands if there are joints to command
   if (!commanded_joint_ids.empty()) {
     const auto write_result = communication_protocol_->sync_write_position(
-        commanded_joint_ids, commanded_positions, commanded_speeds, commanded_accelerations);
+        commanded_joint_ids, commanded_positions, commanded_speeds, commanded_accelerations, commanded_max_torques);
     if (!write_result) {
       spdlog::error("FeetechHardwareInterface::write -> {}", write_result.error());
       return hardware_interface::return_type::ERROR;
