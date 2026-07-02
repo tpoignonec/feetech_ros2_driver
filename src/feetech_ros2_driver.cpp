@@ -15,6 +15,27 @@
 #include <vector>
 
 namespace feetech_ros2_driver {
+
+namespace {
+// Command-interface names for the optional runtime limits.
+constexpr auto kSetMaxVelocityInterface = "set_max_velocity";
+constexpr auto kSetMaxTorqueInterface = "set_max_torque";
+
+// Goal-speed field is 15-bit sign-magnitude. Note a value of 0 means "max speed"
+// on the servo, so we floor commanded speed at 1 tick to keep limit semantics.
+constexpr int kMinSpeedTicks = 1;
+constexpr int kMaxSpeedTicks = (1 << 15) - 1;  // 32767
+constexpr int kMaxTorqueRaw = 1000;
+
+bool to_bool(const std::string& value) {
+  return value == "true" || value == "True" || value == "TRUE" || value == "1";
+}
+
+bool param_bool(const JointParams& params, const std::string& key, bool default_value) {
+  const auto it = params.find(key);
+  return it == params.end() ? default_value : to_bool(it->second);
+}
+}  // namespace
 #if HARDWARE_INTERFACE_VERSION_GTE(4, 34, 0)
 CallbackReturn FeetechHardwareInterface::on_init(const hardware_interface::HardwareComponentInterfaceParams& params) {
   if (hardware_interface::SystemInterface::on_init(params) != CallbackReturn::SUCCESS) {
@@ -110,6 +131,9 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
   joint_ids_.assign(info_.joints.size(), 0);
   max_joint_velocity_.assign(info_.joints.size(), feetech_driver::to_radians(kDefaultVelocityTicksPerSec));
   max_joint_torque_.assign(info_.joints.size(), 1000);  // Default fallback
+  use_velocity_limit_interface_.assign(info_.joints.size(), false);
+  use_torque_limit_interface_.assign(info_.joints.size(), false);
+  rated_torque_.assign(info_.joints.size(), 0.0);
 
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     const auto& joint = info_.joints[i];
@@ -146,6 +170,35 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
     } else {
       spdlog::warn("Joint '{}': could not read max_torque_limit from servo ({}); using default {}", joint_name,
                    read.error(), max_joint_torque_[i]);
+    }
+
+    // Optional runtime-limit command interfaces (opt-in per joint). They are only
+    // meaningful for commanded joints, so disable them on state-only joints.
+    use_velocity_limit_interface_[i] = param_bool(merged_params, "use_velocity_limit_interface", false);
+    use_torque_limit_interface_[i] = param_bool(merged_params, "use_torque_limit_interface", false);
+    if (joint.command_interfaces.empty() && (use_velocity_limit_interface_[i] || use_torque_limit_interface_[i])) {
+      spdlog::warn("Joint '{}': use_*_limit_interface requested but joint has no command interface; ignoring",
+                   joint_name);
+      use_velocity_limit_interface_[i] = false;
+      use_torque_limit_interface_[i] = false;
+    }
+
+    // rated_torque (Nm) is required to convert the set_max_torque interface (Nm)
+    // to raw register units. Required iff the torque-limit interface is enabled.
+    if (use_torque_limit_interface_[i]) {
+      const auto rated_it = merged_params.find("rated_torque");
+      if (rated_it == merged_params.end()) {
+        spdlog::error("Joint '{}': use_torque_limit_interface=true requires 'rated_torque' (Nm)", joint_name);
+        return CallbackReturn::ERROR;
+      }
+      const double rated = std::stod(rated_it->second);
+      if (rated <= 0.0) {
+        spdlog::error("Joint '{}': 'rated_torque' must be > 0, got {}", joint_name, rated);
+        return CallbackReturn::ERROR;
+      }
+      rated_torque_[i] = rated;
+    } else if (merged_params.find("rated_torque") != merged_params.end()) {
+      spdlog::warn("Joint '{}': 'rated_torque' is set but use_torque_limit_interface=false; ignoring", joint_name);
     }
 
     if (merged_params.find("offset") != merged_params.end()) {
@@ -261,11 +314,23 @@ std::vector<hardware_interface::StateInterface> FeetechHardwareInterface::export
 }
 
 std::vector<hardware_interface::CommandInterface> FeetechHardwareInterface::export_command_interfaces() {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
   std::vector<hardware_interface::CommandInterface> command_interfaces;
-  hw_positions_.resize(info_.joints.size(), std::numeric_limits<double>::quiet_NaN());
+  hw_positions_.resize(info_.joints.size(), nan);
+  cmd_max_velocity_.resize(info_.joints.size(), nan);
+  cmd_max_torque_.resize(info_.joints.size(), nan);
   for (uint i = 0; i < info_.joints.size(); i++) {
-    if (!info_.joints[i].command_interfaces.empty()) {
-      command_interfaces.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_POSITION, &hw_positions_[i]);
+    // Limit interfaces only make sense for commanded joints (they are consumed
+    // in write(), which only handles joints with a position command interface).
+    if (info_.joints[i].command_interfaces.empty()) {
+      continue;
+    }
+    command_interfaces.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_POSITION, &hw_positions_[i]);
+    if (use_velocity_limit_interface_[i]) {
+      command_interfaces.emplace_back(info_.joints[i].name, velocity_limit_interface_name_[i], &cmd_max_velocity_[i]);
+    }
+    if (use_torque_limit_interface_[i]) {
+      command_interfaces.emplace_back(info_.joints[i].name, torque_limit_interface_name_[i], &cmd_max_torque_[i]);
     }
   }
 
@@ -306,9 +371,28 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
     if (!info_.joints[i].command_interfaces.empty()) {
       commanded_joint_ids.push_back(joint_ids_[i]);
       commanded_positions.push_back(feetech_driver::from_radians(hw_positions_[i]) + feetech_driver::kStsMidpoint);
-      commanded_speeds.push_back(feetech_driver::from_radians(max_joint_velocity_[i]));
+
+      // Velocity limit (rad/s): commanded interface if enabled & set, else default.
+      double velocity_rad_s = max_joint_velocity_[i];
+      if (use_velocity_limit_interface_[i] && !std::isnan(cmd_max_velocity_[i])) {
+        velocity_rad_s = cmd_max_velocity_[i];
+      }
+      const int speed_ticks =
+          std::clamp(feetech_driver::from_radians(velocity_rad_s), kMinSpeedTicks, kMaxSpeedTicks);
+      commanded_speeds.push_back(speed_ticks);
+
       commanded_accelerations.push_back(50);  // Default acceleration
-      commanded_max_torques.push_back(max_joint_torque_[i]);
+
+      // Torque limit (raw 0..1000): commanded interface (Nm) converted, else default.
+      int max_torque = max_joint_torque_[i];
+      if (use_torque_limit_interface_[i] && !std::isnan(cmd_max_torque_[i])) {
+        max_torque = std::clamp(static_cast<int>(std::lround(cmd_max_torque_[i] / rated_torque_[i] * kMaxTorqueRaw)),
+                                0, kMaxTorqueRaw);
+      } else if (use_torque_limit_interface_[i]) {
+        spdlog::warn("Joint '{}': use_torque_limit_interface=true but command is NaN; using default {}", info_.joints[i].name,
+                     max_joint_torque_[i]);
+      }
+      commanded_max_torques.push_back(max_torque);
     }
   }
 

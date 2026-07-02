@@ -50,8 +50,18 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
   std::vector<uint8_t> previous_hw_positions_;
 
   std::vector<uint8_t> joint_ids_;
-  std::vector<double> max_joint_velocity_;  // rad/s
-  std::vector<int> max_joint_torque_;      // raw register units (0..1000)
+  std::vector<double> max_joint_velocity_;  // rad/s, default limit per joint
+  std::vector<int> max_joint_torque_;      // raw register units (0..1000), default limit per joint
+
+  // Optional per-joint runtime-limit command interfaces (opt-in via params).
+  std::vector<bool> use_velocity_limit_interface_;
+  std::vector<bool> use_torque_limit_interface_;
+  std::vector<double> rated_torque_;  // Nm, required iff use_torque_limit_interface_ (else 0/unused)
+
+  // Command-interface buffers. NaN => use the default limit above.
+  std::vector<double> cmd_max_velocity_;  // rad/s
+  std::vector<double> cmd_max_torque_;    // Nm
+
 
   // Default max velocity, in servo ticks/s.
   static inline constexpr int kDefaultVelocityTicksPerSec = 2400;
