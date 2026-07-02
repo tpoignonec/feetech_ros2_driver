@@ -133,7 +133,7 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
   max_joint_torque_.assign(info_.joints.size(), 1000);  // Default fallback
   use_velocity_limit_interface_.assign(info_.joints.size(), false);
   use_torque_limit_interface_.assign(info_.joints.size(), false);
-  rated_torque_.assign(info_.joints.size(), 0.0);
+  torque_scale_.assign(info_.joints.size(), 0.0);
 
   for (size_t i = 0; i < info_.joints.size(); ++i) {
     const auto& joint = info_.joints[i];
@@ -183,22 +183,26 @@ CallbackReturn FeetechHardwareInterface::configure_joints_(const JointIdConfigMa
       use_torque_limit_interface_[i] = false;
     }
 
-    // rated_torque (Nm) is required to convert the set_max_torque interface (Nm)
-    // to raw register units. Required iff the torque-limit interface is enabled.
+    // torque_scale is the physical torque (Nm) that corresponds to a fully
+    // saturated (raw=1000) torque-limit command; it converts the set_max_torque
+    // interface (Nm) to raw register units. Required if the torque-limit
+    // interface is enabled. If the motor's real torque rating is unknown, set
+    // torque_scale=100 and command set_max_torque in percent [0, 100] instead.
     if (use_torque_limit_interface_[i]) {
-      const auto rated_it = merged_params.find("rated_torque");
-      if (rated_it == merged_params.end()) {
-        spdlog::error("Joint '{}': use_torque_limit_interface=true requires 'rated_torque' (Nm)", joint_name);
+      const auto scale_it = merged_params.find("torque_scale");
+      if (scale_it == merged_params.end()) {
+        spdlog::error("Joint '{}': use_torque_limit_interface=true requires 'torque_scale' (Nm; use 100 for percent)",
+                     joint_name);
         return CallbackReturn::ERROR;
       }
-      const double rated = std::stod(rated_it->second);
-      if (rated <= 0.0) {
-        spdlog::error("Joint '{}': 'rated_torque' must be > 0, got {}", joint_name, rated);
+      const double scale = std::stod(scale_it->second);
+      if (scale <= 0.0) {
+        spdlog::error("Joint '{}': 'torque_scale' must be > 0, got {}", joint_name, scale);
         return CallbackReturn::ERROR;
       }
-      rated_torque_[i] = rated;
-    } else if (merged_params.find("rated_torque") != merged_params.end()) {
-      spdlog::warn("Joint '{}': 'rated_torque' is set but use_torque_limit_interface=false; ignoring", joint_name);
+      torque_scale_[i] = scale;
+    } else if (merged_params.find("torque_scale") != merged_params.end()) {
+      spdlog::warn("Joint '{}': 'torque_scale' is set but use_torque_limit_interface=false; ignoring", joint_name);
     }
 
     if (merged_params.find("offset") != merged_params.end()) {
@@ -327,10 +331,10 @@ std::vector<hardware_interface::CommandInterface> FeetechHardwareInterface::expo
     }
     command_interfaces.emplace_back(info_.joints[i].name, hardware_interface::HW_IF_POSITION, &hw_positions_[i]);
     if (use_velocity_limit_interface_[i]) {
-      command_interfaces.emplace_back(info_.joints[i].name, velocity_limit_interface_name_[i], &cmd_max_velocity_[i]);
+      command_interfaces.emplace_back(info_.joints[i].name, kSetMaxVelocityInterface, &cmd_max_velocity_[i]);
     }
     if (use_torque_limit_interface_[i]) {
-      command_interfaces.emplace_back(info_.joints[i].name, torque_limit_interface_name_[i], &cmd_max_torque_[i]);
+      command_interfaces.emplace_back(info_.joints[i].name, kSetMaxTorqueInterface, &cmd_max_torque_[i]);
     }
   }
 
@@ -386,7 +390,7 @@ hardware_interface::return_type FeetechHardwareInterface::write(const rclcpp::Ti
       // Torque limit (raw 0..1000): commanded interface (Nm) converted, else default.
       int max_torque = max_joint_torque_[i];
       if (use_torque_limit_interface_[i] && !std::isnan(cmd_max_torque_[i])) {
-        max_torque = std::clamp(static_cast<int>(std::lround(cmd_max_torque_[i] / rated_torque_[i] * kMaxTorqueRaw)),
+        max_torque = std::clamp(static_cast<int>(std::lround(cmd_max_torque_[i] / torque_scale_[i] * kMaxTorqueRaw)),
                                 0, kMaxTorqueRaw);
       } else if (use_torque_limit_interface_[i]) {
         spdlog::warn("Joint '{}': use_torque_limit_interface=true but command is NaN; using default {}", info_.joints[i].name,

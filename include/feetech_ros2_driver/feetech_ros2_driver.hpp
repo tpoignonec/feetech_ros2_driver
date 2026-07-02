@@ -56,7 +56,10 @@ class FeetechHardwareInterface : public hardware_interface::SystemInterface {
   // Optional per-joint runtime-limit command interfaces (opt-in via params).
   std::vector<bool> use_velocity_limit_interface_;
   std::vector<bool> use_torque_limit_interface_;
-  std::vector<double> rated_torque_;  // Nm, required iff use_torque_limit_interface_ (else 0/unused)
+  // Nm value that maps to a fully saturated (raw=1000) torque-limit command.
+  // Required iff use_torque_limit_interface_ (else 0/unused). Set to 100 to
+  // command set_max_torque in percent instead, if the real rating is unknown.
+  std::vector<double> torque_scale_;
 
   // Command-interface buffers. NaN => use the default limit above.
   std::vector<double> cmd_max_velocity_;  // rad/s
