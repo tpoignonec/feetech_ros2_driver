@@ -22,11 +22,16 @@ Make sure to look at [Memory table](https://docs.google.com/spreadsheets/d/1GVs7
 * `homing_offset` (optional): Signed offset written to the servo's EEPROM. The servo firmware applies `Present_Position = Actual_Position - Homing_Offset`, so setting `homing_offset = actual_position - 2048` makes the servo report 2048 (center) at your desired physical center. If migrating from the old `offset` parameter: `homing_offset = old_offset - 2048` (since the old offset was effectively the actual position at center).
 * `range_min` (optional): Minimum angle limit (raw ticks, after homing offset is applied).
 * `range_max` (optional): Maximum angle limit (raw ticks, after homing offset is applied).
-* `max_torque_limit` (optional): Maximum torque limit.
+* `max_torque_limit` (optional): Maximum torque limit, written to the servo's EEPROM (raw units, `0`–`1000` = `0`–`100.0%` of the servo's max torque). Also used as the default runtime torque limit (see [Runtime Limit Command Interfaces](#runtime-limit-command-interfaces) below). If omitted, the driver reads back whatever value is already configured on the servo; if that read also fails, it falls back to `1000` (full torque).
 * `protection_current` (optional): Protection current threshold.
 * `overload_torque` (optional): Overload torque threshold.
 * `return_delay_time` (optional): Response delay time.
 * `acceleration` (optional): Acceleration value.
+* `use_velocity_limit_interface` (optional, default `false`): Export a `set_max_velocity` command interface for this joint (rad/s). See [Runtime Limit Command Interfaces](#runtime-limit-command-interfaces).
+* `use_torque_limit_interface` (optional, default `false`): Export a `set_max_torque` command interface for this joint (Nm, see `torque_scale` below). See [Runtime Limit Command Interfaces](#runtime-limit-command-interfaces).
+* `torque_scale` (**required** if `use_torque_limit_interface` is `true`): The torque (Nm) that corresponds to a fully saturated (raw `1000`) torque-limit command — i.e. the servo's stall torque, from its datasheet. If you don't know the real value, set `torque_scale: 100` and command `set_max_torque` directly in percent (`0`–`100`) instead of Nm.
+
+> **Note:** `use_velocity_limit_interface` / `use_torque_limit_interface` are ignored (with a warning) on joints that have no `command_interface` (e.g. leader/state-only joints) — the limit interfaces only make sense for commanded joints.
 
 ### Example
 
@@ -62,6 +67,43 @@ Pass the YAML file path as a hardware parameter:
 
 ```xml
 <param name="joint_config_file">$(find my_robot_bringup)/config/joints.yaml</param>
+```
+
+## Runtime Limit Command Interfaces
+
+By default, every commanded joint moves at a fixed velocity (2400 ticks/s ≈ 3.68 rad/s) and the torque limit configured at startup (`max_torque_limit`, or the servo's current EEPROM value if unset). A joint can opt in to override these dynamically, per `write()` cycle, via two additional `ros2_control` command interfaces:
+
+| Interface | Unit | Enabled by |
+|---|---|---|
+| `<joint>/set_max_velocity` | rad/s | `use_velocity_limit_interface: true` |
+| `<joint>/set_max_torque` | Nm (see `torque_scale`) | `use_torque_limit_interface: true` |
+
+Both interfaces are initialized to `NaN`. While unclaimed, or while the commanded value is `NaN`, the joint uses its default limit (from `max_torque_limit` / the built-in velocity constant) — so a controller that never writes these interfaces sees no change in behavior.
+
+### Torque units
+
+The servo's torque-limit register only understands a fraction of its own stall torque (`0`–`1000` raw = `0`–`100.0%`). The parameter `torque_scale` (Nm) tells the driver what "100%" means for your joint, so it can convert the `set_max_torque` command interface value to raw units:
+
+```
+raw = clamp(round(set_max_torque / torque_scale * 1000), 0, 1000)
+```
+
+* **Know the motor's stall torque?** Set `torque_scale` to that value (from the datasheet, e.g. the STS3215's rated kg·cm converted to Nm), and command `set_max_torque` in real Nm.
+* **Don't know it?** Set `torque_scale: 100` and command `set_max_torque` directly in percent (`0`–`100`).
+
+### Example (`parallel_gripper_action_controller`)
+
+The [`parallel_gripper_action_controller`](https://control.ros.org) supports driving arbitrary velocity/effort command interfaces via its own `max_velocity_interface` / `max_effort_interface` params — a natural pairing with the interfaces above:
+
+```yaml
+# joint_config.yaml
+joints:
+  gripper:
+    id: 6
+    max_torque_limit: 1000
+    use_velocity_limit_interface: true
+    use_torque_limit_interface: true
+    torque_scale: 100  # unknown real rating -> command set_max_torque in percent
 ```
 
 ### Examples
